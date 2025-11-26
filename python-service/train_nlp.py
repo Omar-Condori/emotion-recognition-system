@@ -24,8 +24,9 @@ def load_data():
     # Intentar cargar dataset real si existe
     if os.path.exists("data/emoevent_es.csv"):
         print("Cargando dataset EmoEvent...")
-        df = pd.read_csv("data/emoevent_es.csv")
-        return df['text'].values, df['emotion'].values
+        # El dataset EmoEvent usa tabuladores y la columna se llama 'tweet'
+        df = pd.read_csv("data/emoevent_es.csv", sep='\t')
+        return df['tweet'].values, df['emotion'].values
     
     print("Dataset no encontrado. Generando dataset de ejemplo para demostración...")
     # Dataset sintético básico para que el sistema funcione "out of the box"
@@ -102,9 +103,26 @@ def train():
     model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
     model.summary()
 
+    # Calcular pesos de clases para balancear
+    from sklearn.utils import class_weight
+    class_weights = class_weight.compute_class_weight(
+        class_weight='balanced',
+        classes=np.unique(numeric_labels),
+        y=numeric_labels
+    )
+    class_weights_dict = dict(enumerate(class_weights))
+    print(f"Pesos de clases: {class_weights_dict}")
+
     # 4. Entrenamiento
-    print("Iniciando entrenamiento...")
-    history = model.fit(padded_sequences, categorical_labels, epochs=20, batch_size=16, validation_split=0.2)
+    print("Iniciando entrenamiento con Class Weights...")
+    history = model.fit(
+        padded_sequences, 
+        categorical_labels, 
+        epochs=20, 
+        batch_size=16, 
+        validation_split=0.2,
+        class_weight=class_weights_dict
+    )
     
     model.save(MODEL_PATH)
     print(f"Modelo guardado en {MODEL_PATH}")
