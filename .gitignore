@@ -1,0 +1,38 @@
+# System
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+**/venv/
+python-service/models/*.h5
+!python-service/models/.gitkeep
+
+# Java
+target/
+*.class
+.mvn/wrapper/maven-wrapper.properties
+
+# Flutter
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+flutter_export.json
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
