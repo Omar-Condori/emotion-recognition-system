@@ -16,6 +16,7 @@ env.bak/
 venv.bak/
 **/venv/
 python-service/models/*.h5
+python-service/models/nlp_model_transformer/
 !python-service/models/.gitkeep
 
 # Java

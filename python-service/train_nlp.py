@@ -1,131 +1,157 @@
-import tensorflow as tf
-from tensorflow.keras.preprocessing.text import Tokenizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Embedding, LSTM, Dense, Bidirectional, Dropout
-from tensorflow.keras.utils import to_categorical
+import torch
+from torch.utils.data import DataLoader, Dataset
+from torch.optim import AdamW
+from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
+from sklearn.model_selection import train_test_split
+from sklearn.utils import class_weight
 import pandas as pd
 import numpy as np
-import pickle
 import os
-import json
+import pickle
 
 # Configuración
-MAX_WORDS = 10000
-MAX_LEN = 100
-EMBEDDING_DIM = 100
-MODEL_PATH = "models/nlp_model.h5"
-TOKENIZER_PATH = "models/tokenizer.pickle"
-LABEL_ENCODER_PATH = "models/label_encoder.pickle"
+MODEL_NAME = 'distilbert-base-multilingual-cased'
+MODEL_PATH = "models/nlp_model_transformer"
+MAX_LEN = 128
+BATCH_SIZE = 16
+EPOCHS = 3
+DEVICE = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
-# 1. Dataset (Ejemplo extendido o carga desde CSV)
-# Si tienes el dataset EmoEvent, cárgalo aquí. Si no, usamos este dummy para probar.
+class EmotionDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_len):
+        self.texts = texts
+        self.labels = labels
+        self.tokenizer = tokenizer
+        self.max_len = max_len
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, item):
+        text = str(self.texts[item])
+        label = self.labels[item]
+
+        encoding = self.tokenizer.encode_plus(
+            text,
+            add_special_tokens=True,
+            max_length=self.max_len,
+            return_token_type_ids=False,
+            padding='max_length',
+            truncation=True,
+            return_attention_mask=True,
+            return_tensors='pt',
+        )
+
+        return {
+            'input_ids': encoding['input_ids'].flatten(),
+            'attention_mask': encoding['attention_mask'].flatten(),
+            'labels': torch.tensor(label, dtype=torch.long)
+        }
+
 def load_data():
-    # Intentar cargar dataset real si existe
     if os.path.exists("data/emoevent_es.csv"):
         print("Cargando dataset EmoEvent...")
-        # El dataset EmoEvent usa tabuladores y la columna se llama 'tweet'
         df = pd.read_csv("data/emoevent_es.csv", sep='\t')
         return df['tweet'].values, df['emotion'].values
-    
-    print("Dataset no encontrado. Generando dataset de ejemplo para demostración...")
-    # Dataset sintético básico para que el sistema funcione "out of the box"
-    data = [
-        ("Estoy muy feliz por este logro", "joy"),
-        ("Qué alegría verte de nuevo", "joy"),
-        ("Me siento genial hoy", "joy"),
-        ("Es un día maravilloso", "joy"),
-        ("Tengo mucho miedo de lo que pueda pasar", "fear"),
-        ("Me asusta la oscuridad", "fear"),
-        ("Estoy aterrorizado por las noticias", "fear"),
-        ("Qué horror de película", "fear"),
-        ("Estoy muy triste y deprimido", "sadness"),
-        ("Me duele mucho el corazón", "sadness"),
-        ("No tengo ganas de hacer nada", "sadness"),
-        ("Es una pena que terminara así", "sadness"),
-        ("Estoy furioso con el servicio", "anger"),
-        ("Me molesta mucho tu actitud", "anger"),
-        ("Odio cuando pasa esto", "anger"),
-        ("Qué rabia me da", "anger"),
-        ("No puedo creer lo que veo", "surprise"),
-        ("Wow, esto es increíble", "surprise"),
-        ("Me has dejado sin palabras", "surprise"),
-        ("Qué sorpresa tan agradable", "surprise"),
-        ("Esto me da asco", "disgust"),
-        ("Qué comida tan desagradable", "disgust"),
-        ("Me repugna esa idea", "disgust"),
-        ("Huele fatal aquí", "disgust")
-    ]
-    # Multiplicamos los datos para tener suficiente para entrenar (solo demo)
-    data = data * 20 
-    df = pd.DataFrame(data, columns=['text', 'emotion'])
-    return df['text'].values, df['emotion'].values
+    else:
+        raise FileNotFoundError("No se encontró data/emoevent_es.csv")
 
-# 2. Preprocesamiento
 def train():
     if not os.path.exists("models"):
         os.makedirs("models")
 
+    print(f"Usando dispositivo: {DEVICE}")
+
     texts, labels = load_data()
     
-    # Tokenización
-    tokenizer = Tokenizer(num_words=MAX_WORDS, oov_token="<OOV>")
-    tokenizer.fit_on_texts(texts)
-    sequences = tokenizer.texts_to_sequences(texts)
-    padded_sequences = pad_sequences(sequences, maxlen=MAX_LEN, padding='post', truncating='post')
+    # Mapeo de etiquetas
+    unique_labels = np.unique(labels)
+    label_map = {label: i for i, label in enumerate(unique_labels)}
+    numeric_labels = [label_map[l] for l in labels]
     
-    # Codificación de etiquetas
-    label_mapping = {label: i for i, label in enumerate(np.unique(labels))}
-    numeric_labels = np.array([label_mapping[l] for l in labels])
-    categorical_labels = to_categorical(numeric_labels)
-    
-    # Guardar artefactos
-    with open(TOKENIZER_PATH, 'wb') as handle:
-        pickle.dump(tokenizer, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    # Guardar mapeo
+    with open("models/label_encoder.pickle", 'wb') as f:
+        pickle.dump(label_map, f)
         
-    with open(LABEL_ENCODER_PATH, 'wb') as handle:
-        pickle.dump(label_mapping, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"Etiquetas: {label_map}")
 
-    print(f"Vocabulario: {len(tokenizer.word_index)}")
-    print(f"Etiquetas: {label_mapping}")
+    # Split train/val
+    X_train, X_val, y_train, y_val = train_test_split(texts, numeric_labels, test_size=0.2, random_state=42, stratify=numeric_labels)
 
-    # 3. Modelo (Bi-LSTM)
-    model = Sequential([
-        Embedding(input_dim=MAX_WORDS, output_dim=EMBEDDING_DIM, input_length=MAX_LEN),
-        Bidirectional(LSTM(64, return_sequences=True)),
-        Dropout(0.5),
-        Bidirectional(LSTM(32)),
-        Dense(32, activation='relu'),
-        Dropout(0.5),
-        Dense(len(label_mapping), activation='softmax')
-    ])
+    # Tokenizer
+    tokenizer = DistilBertTokenizer.from_pretrained(MODEL_NAME)
+    
+    # Datasets
+    train_dataset = EmotionDataset(X_train, y_train, tokenizer, MAX_LEN)
+    val_dataset = EmotionDataset(X_val, y_val, tokenizer, MAX_LEN)
+    
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
 
-    model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
-    model.summary()
-
-    # Calcular pesos de clases para balancear
-    from sklearn.utils import class_weight
+    # Class Weights
     class_weights = class_weight.compute_class_weight(
         class_weight='balanced',
-        classes=np.unique(numeric_labels),
-        y=numeric_labels
+        classes=np.unique(y_train),
+        y=y_train
     )
-    class_weights_dict = dict(enumerate(class_weights))
-    print(f"Pesos de clases: {class_weights_dict}")
+    class_weights = torch.tensor(class_weights, dtype=torch.float).to(DEVICE)
+    print(f"Pesos: {class_weights}")
 
-    # 4. Entrenamiento
-    print("Iniciando entrenamiento con Class Weights...")
-    history = model.fit(
-        padded_sequences, 
-        categorical_labels, 
-        epochs=20, 
-        batch_size=16, 
-        validation_split=0.2,
-        class_weight=class_weights_dict
-    )
-    
-    model.save(MODEL_PATH)
-    print(f"Modelo guardado en {MODEL_PATH}")
+    # Modelo
+    model = DistilBertForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=len(unique_labels))
+    model = model.to(DEVICE)
+
+    optimizer = AdamW(model.parameters(), lr=5e-5)
+    loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights)
+
+    # Entrenamiento
+    for epoch in range(EPOCHS):
+        print(f"Epoch {epoch + 1}/{EPOCHS}")
+        model.train()
+        total_loss = 0
+        
+        for batch in train_loader:
+            input_ids = batch['input_ids'].to(DEVICE)
+            attention_mask = batch['attention_mask'].to(DEVICE)
+            labels = batch['labels'].to(DEVICE)
+
+            optimizer.zero_grad()
+            
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss # Hugging Face models calculate loss automatically if labels are provided, but let's use our weighted loss
+            
+            # Recalculate loss with weights
+            logits = outputs.logits
+            loss = loss_fn(logits, labels)
+            
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+        
+        avg_train_loss = total_loss / len(train_loader)
+        print(f"Train Loss: {avg_train_loss}")
+        
+        # Validación
+        model.eval()
+        val_accuracy = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                input_ids = batch['input_ids'].to(DEVICE)
+                attention_mask = batch['attention_mask'].to(DEVICE)
+                labels = batch['labels'].to(DEVICE)
+                
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                predictions = torch.argmax(outputs.logits, dim=1)
+                val_accuracy += (predictions == labels).sum().item()
+        
+        avg_val_acc = val_accuracy / len(X_val)
+        print(f"Val Accuracy: {avg_val_acc}")
+
+    print("Guardando modelo...")
+    model.save_pretrained(MODEL_PATH)
+    tokenizer.save_pretrained(MODEL_PATH)
+    print("Modelo guardado exitosamente.")
 
 if __name__ == "__main__":
     train()

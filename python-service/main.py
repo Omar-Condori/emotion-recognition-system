@@ -2,14 +2,15 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras.preprocessing.sequence import pad_sequences
 import numpy as np
 import os
 import pickle
+import torch
+from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
 from model_utils import preprocess_image, decode_base64_image
 from config import MODEL_PATH, EMOTION_LABELS, API_HOST, API_PORT
 
-app = FastAPI(title="Emotion Recognition API", version="1.1.0")
+app = FastAPI(title="Emotion Recognition API", version="1.2.0")
 
 # Variables globales para modelos
 image_model = None
@@ -18,31 +19,40 @@ tokenizer = None
 nlp_label_mapping = None
 
 # Configuración NLP
-NLP_MODEL_PATH = "models/nlp_model.h5"
-TOKENIZER_PATH = "models/tokenizer.pickle"
-LABEL_ENCODER_PATH = "models/label_encoder.pickle"
-MAX_LEN = 100
+NLP_MODEL_PATH = "models/nlp_model_transformer"
+MAX_LEN = 128
+DEVICE = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
 def load_models():
     global image_model, nlp_model, tokenizer, nlp_label_mapping
     
-    # Cargar Modelo de Imagen
+    # Cargar Modelo de Imagen (TensorFlow/Keras)
     if os.path.exists(MODEL_PATH):
-        image_model = keras.models.load_model(MODEL_PATH)
-        print(f"Modelo de IMAGEN cargado desde {MODEL_PATH}")
+        try:
+            image_model = keras.models.load_model(MODEL_PATH)
+            print(f"Modelo de IMAGEN cargado desde {MODEL_PATH}")
+        except Exception as e:
+            print(f"ERROR cargando modelo de imagen: {e}")
     else:
         print(f"ADVERTENCIA: Modelo de imagen no encontrado en {MODEL_PATH}")
 
-    # Cargar Modelo NLP
-    if os.path.exists(NLP_MODEL_PATH) and os.path.exists(TOKENIZER_PATH):
-        nlp_model = keras.models.load_model(NLP_MODEL_PATH)
-        with open(TOKENIZER_PATH, 'rb') as handle:
-            tokenizer = pickle.load(handle)
-        with open(LABEL_ENCODER_PATH, 'rb') as handle:
-            nlp_label_mapping = pickle.load(handle)
-        print(f"Modelo NLP cargado desde {NLP_MODEL_PATH}")
+    # Cargar Modelo NLP (PyTorch/Transformers)
+    if os.path.exists(NLP_MODEL_PATH):
+        try:
+            print(f"Cargando modelo NLP desde {NLP_MODEL_PATH}...")
+            tokenizer = DistilBertTokenizer.from_pretrained(NLP_MODEL_PATH)
+            nlp_model = DistilBertForSequenceClassification.from_pretrained(NLP_MODEL_PATH)
+            nlp_model.to(DEVICE)
+            nlp_model.eval()
+            
+            with open("models/label_encoder.pickle", 'rb') as handle:
+                nlp_label_mapping = pickle.load(handle)
+                
+            print(f"Modelo NLP Transformer cargado exitosamente en {DEVICE}")
+        except Exception as e:
+            print(f"ERROR cargando modelo NLP: {e}")
     else:
-        print(f"ADVERTENCIA: Modelo NLP no encontrado. Ejecuta train_nlp.py")
+        print(f"ADVERTENCIA: Modelo NLP no encontrado en {NLP_MODEL_PATH}")
 
 @app.on_event("startup")
 async def startup_event():
@@ -64,7 +74,7 @@ class PredictionResponse(BaseModel):
 @app.get("/")
 async def root():
     return {
-        "message": "Emotion Recognition API (Image + Text)",
+        "message": "Emotion Recognition API (Image + Text Transformer)",
         "status": "running",
         "image_model": image_model is not None,
         "nlp_model": nlp_model is not None
@@ -78,7 +88,7 @@ async def health():
         "nlp_model": nlp_model is not None
     }
 
-# Endpoint Imagen (Existente)
+# Endpoint Imagen (TensorFlow)
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_emotion(request: ImageRequest):
     if image_model is None:
@@ -106,7 +116,7 @@ async def predict_emotion(request: ImageRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error procesando imagen: {str(e)}")
 
-# Nuevo Endpoint Texto
+# Endpoint Texto (PyTorch Transformer)
 @app.post("/predict-text", response_model=PredictionResponse)
 async def predict_text_emotion(request: TextRequest):
     if nlp_model is None or tokenizer is None:
@@ -114,20 +124,36 @@ async def predict_text_emotion(request: TextRequest):
     
     try:
         # Preprocesar texto
-        sequences = tokenizer.texts_to_sequences([request.text])
-        padded = pad_sequences(sequences, maxlen=MAX_LEN, padding='post', truncating='post')
+        encoding = tokenizer.encode_plus(
+            request.text,
+            add_special_tokens=True,
+            max_length=MAX_LEN,
+            return_token_type_ids=False,
+            padding='max_length',
+            truncation=True,
+            return_attention_mask=True,
+            return_tensors='pt',
+        )
+        
+        input_ids = encoding['input_ids'].to(DEVICE)
+        attention_mask = encoding['attention_mask'].to(DEVICE)
         
         # Predicción
-        predictions = nlp_model.predict(padded, verbose=0)
-        predicted_idx = np.argmax(predictions[0])
-        confidence = float(predictions[0][predicted_idx])
+        with torch.no_grad():
+            outputs = nlp_model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = outputs.logits
+            probs = torch.nn.functional.softmax(logits, dim=1)
+            
+        probs = probs.cpu().numpy()[0]
+        predicted_idx = np.argmax(probs)
+        confidence = float(probs[predicted_idx])
         
         # Mapeo inverso de etiquetas
         idx_to_label = {v: k for k, v in nlp_label_mapping.items()}
         emotion = idx_to_label[predicted_idx]
         
         probabilities = {
-            idx_to_label[i]: float(predictions[0][i])
+            idx_to_label[i]: float(probs[i])
             for i in range(len(idx_to_label))
         }
         
