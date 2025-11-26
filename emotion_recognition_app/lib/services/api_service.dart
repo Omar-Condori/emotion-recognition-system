@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
 import '../models/emotion_response.dart';
+import '../config.dart';
 
 class ApiService {
   // Cambia esta URL según tu configuración
@@ -11,11 +12,7 @@ class ApiService {
   static const String baseUrl = 'http://172.20.10.2:8080';
 
   static Future<String> _getBaseUrl() async {
-    if (Platform.isAndroid) {
-      return 'http://172.20.10.2:8080';
-    } else {
-      return baseUrl;
-    }
+    return Config.baseUrl;
   }
 
   static Future<EmotionResponse> recognizeEmotion(File imageFile) async {
@@ -31,6 +28,7 @@ class ApiService {
         Uri.parse('$url/api/emotions/recognize'),
         headers: {
           'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true',
         },
         body: jsonEncode({
           'image': base64Image,
@@ -56,6 +54,7 @@ class ApiService {
         Uri.parse('$url/api/emotions/recognize-text'),
         headers: {
           'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true',
         },
         body: jsonEncode({
           'text': text,
@@ -81,6 +80,7 @@ class ApiService {
         Uri.parse('$url/api/emotions/history'),
         headers: {
           'Content-Type': 'application/json',
+          'ngrok-skip-browser-warning': 'true',
         },
       ).timeout(const Duration(seconds: 10));
 
@@ -100,6 +100,7 @@ class ApiService {
 
       final response = await http.get(
         Uri.parse('$url/api/emotions/health'),
+        headers: {'ngrok-skip-browser-warning': 'true'},
       ).timeout(const Duration(seconds: 5));
 
       return response.statusCode == 200;
